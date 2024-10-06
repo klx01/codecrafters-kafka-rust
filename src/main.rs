@@ -6,11 +6,59 @@ use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Debug)]
 struct RequestHeader<'a> {
-    api_key: i16,
+    api_key: ApiKey,
     api_version: i16,
     correlation_id: i32,
     client_id: Option<&'a str>,
 }
+
+#[derive(Debug)]
+enum ErrorCode {
+    Unknown = -1,
+    None = 0,
+    MessageTooLarge = 10,
+    UnsupportedVersion = 35,
+    InvalidRequest = 42,
+}
+impl TryFrom<i16> for ErrorCode {
+    type Error = ();
+    fn try_from(value: i16) -> Result<Self, Self::Error> {
+        match value {
+            x if x == (Self::Unknown as i16) => Ok(Self::Unknown),
+            x if x == (Self::None as i16) => Ok(Self::None),
+            x if x == (Self::MessageTooLarge as i16) => Ok(Self::MessageTooLarge),
+            x if x == (Self::UnsupportedVersion as i16) => Ok(Self::UnsupportedVersion),
+            x if x == (Self::InvalidRequest as i16) => Ok(Self::InvalidRequest),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ApiKey {
+    Produce = 0,
+    Fetch = 1,
+    ListOffsets = 2,
+    Metadata = 3,
+    LeaderAndIsr = 4,
+    ApiVersions = 18,
+}
+impl TryFrom<i16> for ApiKey {
+    type Error = ();
+    fn try_from(value: i16) -> Result<Self, Self::Error> {
+        match value {
+            x if x == (Self::Produce as i16) => Ok(Self::Produce),
+            x if x == (Self::Fetch as i16) => Ok(Self::Fetch),
+            x if x == (Self::ListOffsets as i16) => Ok(Self::ListOffsets),
+            x if x == (Self::Metadata as i16) => Ok(Self::Metadata),
+            x if x == (Self::LeaderAndIsr as i16) => Ok(Self::LeaderAndIsr),
+            x if x == (Self::ApiVersions as i16) => Ok(Self::ApiVersions),
+            _ => Err(()),
+        }
+    }
+}
+
+const ALLOWED_VERSIONS: [i16; 5] = [0, 1, 2, 3, 4];
 
 #[tokio::main]
 async fn main() {
@@ -43,8 +91,17 @@ async fn handle_connection(stream: &mut TcpStream) -> anyhow::Result<()> {
     //println!("request bytes len {:02X?}", (request_data.len() as i32).to_be_bytes());
     //println!("request bytes {:02X?}", request_data);
 
-    let request = parse_request(&request_data)
-        .context("failed to parse request")?;
+    let request = match parse_request(&request_data) {
+        Ok(x) => x,
+        Err(err) => match err {
+            None => anyhow::bail!("failed to parse request before getting correlation id, can't respond"),
+            Some((code, correlation_id)) => {
+                timeout(send_v0_message(stream, correlation_id, (code as i16).to_be_bytes().as_slice())).await
+                    .context("failed to write response")?;
+                return Ok(());
+            },
+        }
+    };
 
     //println!("request header {:?}", request);
 
@@ -54,18 +111,25 @@ async fn handle_connection(stream: &mut TcpStream) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_request(tail: &[u8]) -> anyhow::Result<RequestHeader> {
+fn parse_request(tail: &[u8]) -> Result<RequestHeader, Option<(ErrorCode, i32)>> {
     let (api_key, tail) = split_i16(tail)
-        .context("failed to parse api_key")?;
+        .ok_or(None)?;
     let (api_version, tail) = split_i16(tail)
-        .context("failed to parse api_version")?;
+        .ok_or(None)?;
     let (correlation_id, tail) = split_i32(tail)
-        .context("failed to parse correlation_id")?;
+        .ok_or(None)?;
+
+    let api_key = ApiKey::try_from(api_key)
+        .ok().ok_or((ErrorCode::InvalidRequest, correlation_id))?;
+    if !ALLOWED_VERSIONS.contains(&api_version) {
+        return Err(Some((ErrorCode::UnsupportedVersion, correlation_id)));
+    }
+
     let (id_length, tail) = split_i16(tail)
-        .context("failed to parse id_length")?;
+        .ok_or((ErrorCode::InvalidRequest, correlation_id))?;
     let (client_id, tail) = if id_length > 0 {
         let (client_id, tail) = split_utf8(tail, id_length as usize)
-            .context("failed to parse client_id")?;
+            .ok_or((ErrorCode::InvalidRequest, correlation_id))?;
         (Some(client_id), tail)
     } else {
         (None, tail)
@@ -80,30 +144,28 @@ fn parse_request(tail: &[u8]) -> anyhow::Result<RequestHeader> {
     Ok(header)
 }
 
-fn split_i16(tail: &[u8]) -> anyhow::Result<(i16, &[u8])> {
-    let (data, tail) = split_bytes(tail, 2)
-        .context("failed to read i16")?;
-    Ok((i16::from_be_bytes(data.try_into().unwrap()), tail))
+fn split_i16(tail: &[u8]) -> Option<(i16, &[u8])> {
+    let (data, tail) = split_bytes(tail, 2)?;
+    Some((i16::from_be_bytes(data.try_into().unwrap()), tail))
 }
 
-fn split_i32(tail: &[u8]) -> anyhow::Result<(i32, &[u8])> {
-    let (data, tail) = split_bytes(tail, 4)
-        .context("failed to read i32")?;
-    Ok((i32::from_be_bytes(data.try_into().unwrap()), tail))
+fn split_i32(tail: &[u8]) -> Option<(i32, &[u8])> {
+    let (data, tail) = split_bytes(tail, 4)?;
+    Some((i32::from_be_bytes(data.try_into().unwrap()), tail))
 }
 
-fn split_bytes(tail: &[u8], length: usize) -> anyhow::Result<(&[u8], &[u8])> {
+fn split_bytes(tail: &[u8], length: usize) -> Option<(&[u8], &[u8])> {
     if tail.len() < length {
-        anyhow::bail!("failed to read {length} bytes, data too short");
+        return None;
     }
     let (data, tail) = tail.split_at(length);
-    Ok((data, tail))
+    Some((data, tail))
 }
 
-fn split_utf8(tail: &[u8], byte_length: usize) -> anyhow::Result<(&str, &[u8])> {
+fn split_utf8(tail: &[u8], byte_length: usize) -> Option<(&str, &[u8])> {
     let (data, tail) = split_bytes(tail, byte_length)?;
-    let data = std::str::from_utf8(data)?;
-    Ok((data, tail))
+    let data = std::str::from_utf8(data).ok()?;
+    Some((data, tail))
 }
 
 async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Box<[u8]>> {
