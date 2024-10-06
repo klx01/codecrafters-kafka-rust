@@ -187,7 +187,7 @@ ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_
       max_version => INT16
     throttle_time_ms => INT32
      */
-    if header.api_version < 3 {
+    if (header.api_version < 3) || (header.api_version > MAX_VERSION) {
         return respond_error(stream, header.correlation_id, ErrorCode::UnsupportedVersion, true).await;
     }
 
