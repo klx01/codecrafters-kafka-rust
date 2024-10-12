@@ -13,6 +13,12 @@ struct RequestHeader<'a> {
     client_id: Option<&'a str>,
 }
 
+#[derive(Debug)]
+struct Request<'a> {
+    header: RequestHeader<'a>,
+    data: &'a [u8],
+}
+
 #[derive(Debug, PartialEq, Copy, Clone)]
 enum ErrorCode {
     Unknown = -1,
@@ -84,15 +90,22 @@ async fn main() {
     }
 }
 
+const DEBUG_REQUEST: bool = true;
+const DEBUG_RESPONSE: bool = true;
 async fn handle_connection(stream: &mut TcpStream) -> anyhow::Result<()> {
-    // echo -e '\x00\x00\x00\x23\x00\x12\x00\x04\x46\xFD\xAD\x22\x00\x09\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x00\x0A\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x04\x30\x2E\x31\x00' | nc 127.0.0.1 9092
+    // echo -n -e '\x00\x00\x00\x23\x00\x12\x00\x04\x46\xFD\xAD\x22\x00\x09\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x00\x0A\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x04\x30\x2E\x31\x00' | nc 127.0.0.1 9092
     loop {
         let request_data = timeout(read_request(stream)).await
             .context("failed to read request")?;
-        //println!("request bytes len {:02X?}", (request_data.len() as i32).to_be_bytes());
-        //println!("request bytes {:02X?}", request_data);
+        let Some(request_data) = request_data else {
+            return Ok(());
+        };
+        if DEBUG_REQUEST {
+            println!("request len {} bytes {:02X?}", request_data.len(), (request_data.len() as i32).to_be_bytes());
+            println!("request bytes {:02X?}", request_data);
+        }
 
-        let (header, request_data) = match parse_request_header(&request_data) {
+        let request = match parse_request_header(&request_data) {
             Ok(x) => x,
             Err(err) => match err {
                 None => anyhow::bail!("failed to parse request before getting correlation id, can't respond"),
@@ -102,16 +115,24 @@ async fn handle_connection(stream: &mut TcpStream) -> anyhow::Result<()> {
                 },
             }
         };
-        //println!("request header {:?}", request);
+        if DEBUG_REQUEST {
+            println!("request header {:?}", request.header);
+        }
 
-        match header.api_key {
-            ApiKey::ApiVersions => handle_api_versions(stream, header, request_data).await?,
-            ApiKey::Fetch => handle_fetch(stream, header, request_data).await?,
+        match request.header.api_key {
+            ApiKey::ApiVersions => handle_api_versions(stream, request).await?,
+            ApiKey::Fetch => handle_fetch(stream, request).await?,
         }
     }
 }
 
-async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Box<[u8]>> {
+async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Option<Box<[u8]>>> {
+    let peek_len = stream.peek(&mut [0]).await
+        .context("Failed to peek message")?;
+    if peek_len == 0 {
+        return Ok(None);
+    }
+
     let length = stream.read_i32().await
         .context("Failed to read message length")?;
     if length > 1024 * 1024 * 1024 {
@@ -123,10 +144,10 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Box<[u8]>> {
     let read_len = stream.read_exact(&mut message).await
         .context(format!("Failed to read message with expected size {length}"))?;
     assert_eq!(read_len, length);
-    Ok(message)
+    Ok(Some(message))
 }
 
-fn parse_request_header(tail: &[u8]) -> Result<(RequestHeader, &[u8]), Option<(ErrorCode, i32)>> {
+fn parse_request_header(tail: &[u8]) -> Result<Request, Option<(ErrorCode, i32)>> {
     /*
 Request Header v2 => request_api_key request_api_version correlation_id client_id TAG_BUFFER
   request_api_key => INT16
@@ -160,7 +181,7 @@ Request Header v2 => request_api_key request_api_version correlation_id client_i
         correlation_id,
         client_id,
     };
-    Ok((header, tail))
+    Ok(Request{header, data: tail})
 }
 
 fn split_i16(tail: &[u8]) -> Option<(i16, &[u8])> {
@@ -187,7 +208,7 @@ fn split_utf8(tail: &[u8], byte_length: usize) -> Option<(&str, &[u8])> {
     Some((data, tail))
 }
 
-async fn handle_api_versions<'a, 'b>(stream: &'a mut TcpStream, header: RequestHeader<'b>, tail: &'b [u8]) -> anyhow::Result<()> {
+async fn handle_api_versions<'a, 'b>(stream: &'a mut TcpStream, request: Request<'b>) -> anyhow::Result<()> {
     /*
 ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_BUFFER
     error_code => INT16
@@ -197,7 +218,7 @@ ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_
       max_version => INT16
     throttle_time_ms => INT32
      */
-    if !check_version(stream, &header, true).await? {
+    if !check_version(stream, &request.header, true).await? {
         return Ok(());
     }
 
@@ -217,12 +238,12 @@ ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_
 
     put_compact_array_len(&mut message, None); // tag buffer in the end
 
-    timeout(send_response(stream, header.correlation_id, &message, true)).await
+    timeout(send_response(stream, request.header.correlation_id, &message, true)).await
         .context("failed to write response")?;
     Ok(())
 }
 
-async fn handle_fetch<'a, 'b>(stream: &'a mut TcpStream, header: RequestHeader<'b>, tail: &'b [u8]) -> anyhow::Result<()> {
+async fn handle_fetch<'a, 'b>(stream: &'a mut TcpStream, request: Request<'b>) -> anyhow::Result<()> {
     /*
 Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level session_id session_epoch [topics] [forgotten_topics_data] rack_id TAG_BUFFER 
   max_wait_ms => INT32
@@ -245,7 +266,7 @@ Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level s
     partitions => INT32
   rack_id => COMPACT_STRING
      */
-    if !check_version(stream, &header, true).await? {
+    if !check_version(stream, &request.header, true).await? {
         return Ok(());
     }
 
@@ -306,14 +327,16 @@ Response Header v1 => correlation_id TAG_BUFFER
     }
     stream.write(data).await?;
 
-    /*let mut debug = BytesMut::new();
-    debug.put_i32(message_length as i32);
-    debug.put_i32(correlation_id);
-    if !is_header_v0 {
-        debug.put_u8(0);
+    if DEBUG_RESPONSE {
+        let mut debug = BytesMut::new();
+        debug.put_i32(message_length as i32);
+        debug.put_i32(correlation_id);
+        if !is_header_v0 {
+            debug.put_u8(0);
+        }
+        debug.put(data);
+        println!("response bytes {:02X?}", &debug[..]);
     }
-    debug.put(data);
-    println!("response bytes {:02X?}", debug);*/
 
     Ok(())
 }
