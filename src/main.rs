@@ -13,7 +13,7 @@ struct RequestHeader<'a> {
     client_id: Option<&'a str>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 enum ErrorCode {
     Unknown = -1,
     None = 0,
@@ -35,8 +35,9 @@ impl TryFrom<i16> for ErrorCode {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 enum ApiKey {
+    Fetch = 1,
     ApiVersions = 18,
 }
 impl TryFrom<i16> for ApiKey {
@@ -49,8 +50,16 @@ impl TryFrom<i16> for ApiKey {
     }
 }
 
-const MIN_VERSION: i16 = 0;
-const MAX_VERSION: i16 = 4;
+#[derive(Debug, PartialEq)]
+struct ApiVersion {
+    key: ApiKey,
+    min: i16,
+    max: i16,
+}
+const API_VERSIONS: [ApiVersion; 2] = [
+    ApiVersion{ key: ApiKey::ApiVersions, min: 3, max: 4 },
+    ApiVersion{ key: ApiKey::Fetch, min: 16, max: 16 },
+];
 
 #[tokio::main]
 async fn main() {
@@ -97,6 +106,7 @@ async fn handle_connection(stream: &mut TcpStream) -> anyhow::Result<()> {
 
         match header.api_key {
             ApiKey::ApiVersions => handle_api_versions(stream, header, request_data).await?,
+            ApiKey::Fetch => handle_fetch(stream, header, request_data).await?,
         }
     }
 }
@@ -118,7 +128,7 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Box<[u8]>> {
 
 fn parse_request_header(tail: &[u8]) -> Result<(RequestHeader, &[u8]), Option<(ErrorCode, i32)>> {
     /*
-Request Header v2 => request_api_key request_api_version correlation_id client_id TAG_BUFFER 
+Request Header v2 => request_api_key request_api_version correlation_id client_id TAG_BUFFER
   request_api_key => INT16
   request_api_version => INT16
   correlation_id => INT32
@@ -179,35 +189,86 @@ fn split_utf8(tail: &[u8], byte_length: usize) -> Option<(&str, &[u8])> {
 
 async fn handle_api_versions<'a, 'b>(stream: &'a mut TcpStream, header: RequestHeader<'b>, tail: &'b [u8]) -> anyhow::Result<()> {
     /*
-ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_BUFFER 
+ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_BUFFER
     error_code => INT16
-    api_keys => api_key min_version max_version TAG_BUFFER 
+    api_keys => api_key min_version max_version TAG_BUFFER
       api_key => INT16
       min_version => INT16
       max_version => INT16
     throttle_time_ms => INT32
      */
-    if (header.api_version < 3) || (header.api_version > MAX_VERSION) {
-        return respond_error(stream, header.correlation_id, ErrorCode::UnsupportedVersion, true).await;
+    if !check_version(stream, &header, true).await? {
+        return Ok(());
     }
 
     let mut message = BytesMut::with_capacity(8);
     message.put_i16(ErrorCode::None as i16);
 
-    put_compact_array_len(&mut message, Some(1));
-    message.put_i16(ApiKey::ApiVersions as i16);
-    message.put_i16(MIN_VERSION);
-    message.put_i16(MAX_VERSION);
+    put_compact_array_len(&mut message, Some(API_VERSIONS.len() as u8));
+    for version in API_VERSIONS {
+        message.put_i16(version.key as i16);
+        message.put_i16(version.min);
+        message.put_i16(version.max);
+    }
 
     put_compact_array_len(&mut message, None); // tag buffer after api keys
 
     message.put_i32(0); // throttle_time_ms
 
     put_compact_array_len(&mut message, None); // tag buffer in the end
-    
+
     timeout(send_response(stream, header.correlation_id, &message, true)).await
         .context("failed to write response")?;
     Ok(())
+}
+
+async fn handle_fetch<'a, 'b>(stream: &'a mut TcpStream, header: RequestHeader<'b>, tail: &'b [u8]) -> anyhow::Result<()> {
+    /*
+Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level session_id session_epoch [topics] [forgotten_topics_data] rack_id TAG_BUFFER 
+  max_wait_ms => INT32
+  min_bytes => INT32
+  max_bytes => INT32
+  isolation_level => INT8
+  session_id => INT32
+  session_epoch => INT32
+  topics => topic_id [partitions] TAG_BUFFER 
+    topic_id => UUID
+    partitions => partition current_leader_epoch fetch_offset last_fetched_epoch log_start_offset partition_max_bytes TAG_BUFFER 
+      partition => INT32
+      current_leader_epoch => INT32
+      fetch_offset => INT64
+      last_fetched_epoch => INT32
+      log_start_offset => INT64
+      partition_max_bytes => INT32
+  forgotten_topics_data => topic_id [partitions] TAG_BUFFER 
+    topic_id => UUID
+    partitions => INT32
+  rack_id => COMPACT_STRING
+     */
+    if !check_version(stream, &header, true).await? {
+        return Ok(());
+    }
+
+    anyhow::bail!("fetch not implemented")
+}
+
+async fn check_version<'a, 'b, 'c>(stream: &'a mut TcpStream, header: &'c RequestHeader<'b>, is_header_v0: bool) -> anyhow::Result<bool> {
+    let allowed_versions = find_allowed_versions(header.api_key);
+    if (header.api_version >= allowed_versions.min) && (header.api_version <= allowed_versions.max) {
+        Ok(true)
+    } else {
+        respond_error(stream, header.correlation_id, ErrorCode::UnsupportedVersion, is_header_v0).await?;
+        Ok(false)
+    }
+}
+
+fn find_allowed_versions(api_key: ApiKey) -> ApiVersion {
+    for version in API_VERSIONS {
+        if version.key == api_key {
+            return version;
+        }
+    }
+    panic!("Missing version for api key {api_key:?}");
 }
 
 fn put_compact_array_len(buf: &mut BytesMut, len: Option<u8>) {
@@ -231,10 +292,10 @@ async fn respond_error(stream: &mut TcpStream, correlation_id: i32, code: ErrorC
 
 async fn send_response(stream: &mut TcpStream, correlation_id: i32, data: &[u8], is_header_v0: bool) -> anyhow::Result<()> {
     /*
-Response Header v0 => correlation_id 
+Response Header v0 => correlation_id
   correlation_id => INT32
 
-Response Header v1 => correlation_id TAG_BUFFER 
+Response Header v1 => correlation_id TAG_BUFFER
   correlation_id => INT32
      */
     let message_length = data.len() + correlation_id.to_be_bytes().len();
