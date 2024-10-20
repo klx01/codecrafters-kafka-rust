@@ -50,6 +50,7 @@ impl TryFrom<i16> for ApiKey {
     type Error = ();
     fn try_from(value: i16) -> Result<Self, Self::Error> {
         match value {
+            x if x == (Self::Fetch as i16) => Ok(Self::Fetch),
             x if x == (Self::ApiVersions as i16) => Ok(Self::ApiVersions),
             _ => Err(()),
         }
@@ -93,7 +94,6 @@ async fn main() {
 const DEBUG_REQUEST: bool = true;
 const DEBUG_RESPONSE: bool = true;
 async fn handle_connection(stream: &mut TcpStream) -> anyhow::Result<()> {
-    // echo -n -e '\x00\x00\x00\x23\x00\x12\x00\x04\x46\xFD\xAD\x22\x00\x09\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x00\x0A\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x04\x30\x2E\x31\x00' | nc 127.0.0.1 9092
     loop {
         let request_data = timeout(read_request(stream)).await
             .context("failed to read request")?;
@@ -210,6 +210,8 @@ fn split_utf8(tail: &[u8], byte_length: usize) -> Option<(&str, &[u8])> {
 
 async fn handle_api_versions<'a, 'b>(stream: &'a mut TcpStream, request: Request<'b>) -> anyhow::Result<()> {
     /*
+echo -n -e '\x00\x00\x00\x23\x00\x12\x00\x04\x46\xFD\xAD\x22\x00\x09\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x00\x0A\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x04\x30\x2E\x31\x00' | nc 127.0.0.1 9092
+    
 ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_BUFFER
     error_code => INT16
     api_keys => api_key min_version max_version TAG_BUFFER
@@ -244,6 +246,8 @@ ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_
 
 async fn handle_fetch<'a, 'b>(stream: &'a mut TcpStream, request: Request<'b>) -> anyhow::Result<()> {
     /*
+echo -n -e '\x00\x00\x00\x30\x00\x01\x00\x10\x3C\x6E\x10\x30\x00\x0C\x6B\x61\x66\x6B\x61\x2D\x74\x65\x73\x74\x65\x72\x00\x00\x00\x01\xF4\x00\x00\x00\x01\x03\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x01\x01\x00' | nc 127.0.0.1 9092
+    
 Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level session_id session_epoch [topics] [forgotten_topics_data] rack_id TAG_BUFFER 
   max_wait_ms => INT32
   min_bytes => INT32
