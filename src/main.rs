@@ -211,7 +211,7 @@ fn split_utf8(tail: &[u8], byte_length: usize) -> Option<(&str, &[u8])> {
 async fn handle_api_versions<'a, 'b>(stream: &'a mut TcpStream, request: Request<'b>) -> anyhow::Result<()> {
     /*
 echo -n -e '\x00\x00\x00\x23\x00\x12\x00\x04\x46\xFD\xAD\x22\x00\x09\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x00\x0A\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x04\x30\x2E\x31\x00' | nc 127.0.0.1 9092
-    
+
 ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_BUFFER
     error_code => INT16
     api_keys => api_key min_version max_version TAG_BUFFER
@@ -247,7 +247,7 @@ ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_
 async fn handle_fetch<'a, 'b>(stream: &'a mut TcpStream, request: Request<'b>) -> anyhow::Result<()> {
     /*
 echo -n -e '\x00\x00\x00\x30\x00\x01\x00\x10\x3C\x6E\x10\x30\x00\x0C\x6B\x61\x66\x6B\x61\x2D\x74\x65\x73\x74\x65\x72\x00\x00\x00\x01\xF4\x00\x00\x00\x01\x03\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x01\x01\x00' | nc 127.0.0.1 9092
-    
+
 Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level session_id session_epoch [topics] [forgotten_topics_data] rack_id TAG_BUFFER 
   max_wait_ms => INT32
   min_bytes => INT32
@@ -296,8 +296,8 @@ Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level s
     message.put_i16(ErrorCode::None as i16); // error_code
     message.put_i32(0); // session_id
 
-    put_compact_array_len(&mut message, Some(0)); // responses
-    put_compact_array_len(&mut message, Some(0)); // tag buffer
+    put_compact_array_len(&mut message, None); // responses
+    put_compact_array_len(&mut message, None); // tag buffer
 
     timeout(send_response(stream, request.header.correlation_id, &message, false)).await
         .context("failed to write response")?;
