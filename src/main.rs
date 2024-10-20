@@ -90,8 +90,8 @@ async fn main() {
     }
 }
 
-const DEBUG_REQUEST: bool = false;
-const DEBUG_RESPONSE: bool = false;
+const DEBUG_REQUEST: bool = true;
+const DEBUG_RESPONSE: bool = true;
 async fn handle_connection(stream: &mut TcpStream) -> anyhow::Result<()> {
     // echo -n -e '\x00\x00\x00\x23\x00\x12\x00\x04\x46\xFD\xAD\x22\x00\x09\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x00\x0A\x6B\x61\x66\x6B\x61\x2D\x63\x6C\x69\x04\x30\x2E\x31\x00' | nc 127.0.0.1 9092
     loop {
