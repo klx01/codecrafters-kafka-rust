@@ -222,7 +222,7 @@ ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms TAG_
         return Ok(());
     }
 
-    let mut message = BytesMut::with_capacity(8);
+    let mut message = BytesMut::with_capacity(8 + (API_VERSIONS.len() * 7));
     message.put_i16(ErrorCode::None as i16);
 
     put_compact_array_len(&mut message, Some(API_VERSIONS.len() as u8));
@@ -264,12 +264,40 @@ Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level s
     topic_id => UUID
     partitions => INT32
   rack_id => COMPACT_STRING
+
+  Fetch Response (Version: 16) => throttle_time_ms error_code session_id [responses] TAG_BUFFER
+      throttle_time_ms => INT32
+      error_code => INT16
+      session_id => INT32
+      responses => topic_id [partitions] TAG_BUFFER
+        topic_id => UUID
+        partitions => partition_index error_code high_watermark last_stable_offset log_start_offset [aborted_transactions] preferred_read_replica records TAG_BUFFER
+          partition_index => INT32
+          error_code => INT16
+          high_watermark => INT64
+          last_stable_offset => INT64
+          log_start_offset => INT64
+          aborted_transactions => producer_id first_offset TAG_BUFFER
+            producer_id => INT64
+            first_offset => INT64
+          preferred_read_replica => INT32
+          records => COMPACT_RECORDS
      */
     if !check_version(stream, &request.header, true).await? {
         return Ok(());
     }
 
-    anyhow::bail!("fetch not implemented")
+    let mut message = BytesMut::with_capacity(1000);
+    message.put_i32(0); // throttle_time_ms
+    message.put_i16(ErrorCode::None as i16); // error_code
+    message.put_i32(0); // session_id
+
+    put_compact_array_len(&mut message, Some(0)); // responses
+    put_compact_array_len(&mut message, Some(0)); // tag buffer
+
+    timeout(send_response(stream, request.header.correlation_id, &message, true)).await
+        .context("failed to write response")?;
+    Ok(())
 }
 
 async fn check_version<'a, 'b, 'c>(stream: &'a mut TcpStream, header: &'c RequestHeader<'b>, is_header_v0: bool) -> anyhow::Result<bool> {
