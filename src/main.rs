@@ -287,7 +287,7 @@ Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level s
           preferred_read_replica => INT32
           records => COMPACT_RECORDS
      */
-    if !check_version(stream, &request.header, true).await? {
+    if !check_version(stream, &request.header, false).await? {
         return Ok(());
     }
 
@@ -299,7 +299,7 @@ Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level s
     put_compact_array_len(&mut message, Some(0)); // responses
     put_compact_array_len(&mut message, Some(0)); // tag buffer
 
-    timeout(send_response(stream, request.header.correlation_id, &message, true)).await
+    timeout(send_response(stream, request.header.correlation_id, &message, false)).await
         .context("failed to write response")?;
     Ok(())
 }
